@@ -85,6 +85,14 @@ func (ec *Client) BlockByHash(ctx context.Context, hash common.Hash) (*types.Blo
 	return ec.getBlock(ctx, "eth_getBlockByHash", hash, true)
 }
 
+func (ec *Client) BlockByStringHash(ctx context.Context, hash string) (*types.Block, error) {
+	return ec.getBlock(ctx, "eth_getBlockByHash", hash, true)
+}
+
+func (ec *Client) BlockByStringHashRaw(ctx context.Context, hash string) (*json.RawMessage, error) {
+	return ec.getBlockRaw(ctx, "eth_getBlockByHash", hash, true)
+}
+
 func (ec *Client) BlockByNumberAndRank(ctx context.Context, number *big.Int, rank uint64) (*types.Block, error) {
 	return ec.getBlock(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, rank) //+rank)
 }
@@ -318,6 +326,15 @@ func (ec *Client) getBlock(ctx context.Context, method string, args ...interface
 
 // HeaderByHash returns the block header with the given hash.
 func (ec *Client) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
+	var head *types.Header
+	err := ec.c.CallContext(ctx, &head, "eth_getBlockByHash", hash, false)
+	if err == nil && head == nil {
+		err = ethereum.NotFound
+	}
+	return head, err
+}
+
+func (ec *Client) HeaderByStringHash(ctx context.Context, hash string) (*types.Header, error) {
 	var head *types.Header
 	err := ec.c.CallContext(ctx, &head, "eth_getBlockByHash", hash, false)
 	if err == nil && head == nil {
