@@ -94,11 +94,11 @@ func (ec *Client) BlockByStringHashRaw(ctx context.Context, hash string) (*json.
 }
 
 func (ec *Client) BlockByNumberAndRank(ctx context.Context, number *big.Int, rank uint64) (*types.Block, error) {
-	return ec.getBlock(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, rank) //+rank)
+	return ec.getBlock(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
 }
 
 func (ec *Client) BlockByNumberAndRankRaw(ctx context.Context, number *big.Int, rank uint64) (*json.RawMessage, error) {
-	return ec.getBlockRaw(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, rank) //+rank)
+	return ec.getBlockRaw(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
 }
 
 // BlockByNumber returns a block from the current canonical chain. If number is nil, the
