@@ -763,6 +763,12 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
 }
 
+func (ec *Client) GetPendingTransactions(ctx context.Context) (json.RawMessage, error) {
+	var res json.RawMessage
+	var err = ec.c.CallContext(ctx, &res, "txpool_besuPendingTransactions", nil)
+	return res, err
+}
+
 func toBlockNumArg(number *big.Int) string {
 	if number == nil {
 		return "latest"
