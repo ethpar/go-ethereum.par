@@ -85,22 +85,6 @@ func (ec *Client) BlockByHash(ctx context.Context, hash common.Hash) (*types.Blo
 	return ec.getBlock(ctx, "eth_getBlockByHash", hash, true)
 }
 
-func (ec *Client) BlockByStringHash(ctx context.Context, hash string) (*types.Block, error) {
-	return ec.getBlock(ctx, "eth_getBlockByHash", hash, true)
-}
-
-func (ec *Client) BlockByStringHashRaw(ctx context.Context, hash string) (*json.RawMessage, error) {
-	return ec.getBlockRaw(ctx, "eth_getBlockByHash", hash, true)
-}
-
-func (ec *Client) BlockByNumberAndRank(ctx context.Context, number *big.Int, rank uint64) (*types.Block, error) {
-	return ec.getBlock(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
-}
-
-func (ec *Client) BlockByNumberAndRankRaw(ctx context.Context, number *big.Int, rank uint64) (*json.RawMessage, error) {
-	return ec.getBlockRaw(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
-}
-
 // BlockByNumber returns a block from the current canonical chain. If number is nil, the
 // latest known block is returned.
 //
@@ -139,114 +123,6 @@ type rpcBlock struct {
 	Transactions []rpcTransaction    `json:"transactions"`
 	UncleHashes  []common.Hash       `json:"uncles"`
 	Withdrawals  []*types.Withdrawal `json:"withdrawals,omitempty"`
-	Requests     []*types.Request    `json:"requests,omitempty"`
-}
-
-func (ec *Client) getBlockRaw(ctx context.Context, method string, args ...interface{}) (*json.RawMessage, error) {
-	var raw json.RawMessage
-	err := ec.c.CallContext(ctx, &raw, method, args...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Decode header and transactions.
-	var head *types.Header
-	if err := json.Unmarshal(raw, &head); err != nil {
-		return nil, err
-	}
-	// When the block is not found, the API returns JSON null.
-	if head == nil {
-		return nil, ethereum.NotFound
-	}
-
-	var body rpcBlock
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, err
-	}
-	// Quick-verify transaction and uncle lists. This mostly helps with debugging the server.
-	if head.UncleHash == types.EmptyUncleHash && len(body.UncleHashes) > 0 {
-		return nil, errors.New("server returned non-empty uncle list but block header indicates no uncles")
-	}
-	if head.UncleHash != types.EmptyUncleHash && len(body.UncleHashes) == 0 {
-		return nil, errors.New("server returned empty uncle list but block header indicates uncles")
-	}
-	if head.TxHash == types.EmptyTxsHash && len(body.Transactions) > 0 {
-		return nil, errors.New("server returned non-empty transaction list but block header indicates no transactions")
-	}
-	if head.TxHash != types.EmptyTxsHash && len(body.Transactions) == 0 {
-		return nil, errors.New("server returned empty transaction list but block header indicates transactions")
-	}
-
-	return &raw, nil
-}
-func (ec *Client) DecodeBlockRaw(raw json.RawMessage, ctx context.Context) (*types.Block, error) {
-	var head *types.Header
-	if err := json.Unmarshal(raw, &head); err != nil {
-		return nil, err
-	}
-	// When the block is not found, the API returns JSON null.
-	if head == nil {
-		return nil, ethereum.NotFound
-	}
-
-	var body rpcBlock
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return nil, err
-	}
-	// Quick-verify transaction and uncle lists. This mostly helps with debugging the server.
-	if head.UncleHash == types.EmptyUncleHash && len(body.UncleHashes) > 0 {
-		return nil, errors.New("server returned non-empty uncle list but block header indicates no uncles")
-	}
-	if head.UncleHash != types.EmptyUncleHash && len(body.UncleHashes) == 0 {
-		return nil, errors.New("server returned empty uncle list but block header indicates uncles")
-	}
-	if head.TxHash == types.EmptyTxsHash && len(body.Transactions) > 0 {
-		return nil, errors.New("server returned non-empty transaction list but block header indicates no transactions")
-	}
-	if head.TxHash != types.EmptyTxsHash && len(body.Transactions) == 0 {
-		return nil, errors.New("server returned empty transaction list but block header indicates transactions")
-	}
-
-	var uncles []*types.Header
-	if ctx != nil {
-		if len(body.UncleHashes) > 0 {
-			uncles = make([]*types.Header, len(body.UncleHashes))
-			reqs := make([]rpc.BatchElem, len(body.UncleHashes))
-			for i := range reqs {
-				reqs[i] = rpc.BatchElem{
-					Method: "eth_getUncleByBlockHashAndIndex",
-					Args:   []interface{}{body.Hash, hexutil.EncodeUint64(uint64(i))},
-					Result: &uncles[i],
-				}
-			}
-			if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
-				return nil, err
-			}
-			for i := range reqs {
-				if reqs[i].Error != nil {
-					return nil, reqs[i].Error
-				}
-				if uncles[i] == nil {
-					return nil, fmt.Errorf("got null header for uncle %d of block %x", i, body.Hash[:])
-				}
-			}
-		}
-	}
-	// Fill the sender cache of transactions in the block.
-	txs := make([]*types.Transaction, len(body.Transactions))
-	for i, tx := range body.Transactions {
-		if tx.From != nil {
-			setSenderFromServer(tx.tx, *tx.From, body.Hash)
-		}
-		txs[i] = tx.tx
-	}
-	return types.NewBlockWithHeader(head).WithBody(
-		types.Body{
-			Transactions: txs,
-			Uncles:       uncles,
-			Withdrawals:  body.Withdrawals,
-			Requests:     body.Requests,
-		}), nil
 }
 
 func (ec *Client) getBlock(ctx context.Context, method string, args ...interface{}) (*types.Block, error) {
@@ -315,26 +191,17 @@ func (ec *Client) getBlock(ctx context.Context, method string, args ...interface
 		}
 		txs[i] = tx.tx
 	}
+
 	return types.NewBlockWithHeader(head).WithBody(
 		types.Body{
 			Transactions: txs,
 			Uncles:       uncles,
 			Withdrawals:  body.Withdrawals,
-			Requests:     body.Requests,
 		}), nil
 }
 
 // HeaderByHash returns the block header with the given hash.
 func (ec *Client) HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error) {
-	var head *types.Header
-	err := ec.c.CallContext(ctx, &head, "eth_getBlockByHash", hash, false)
-	if err == nil && head == nil {
-		err = ethereum.NotFound
-	}
-	return head, err
-}
-
-func (ec *Client) HeaderByStringHash(ctx context.Context, hash string) (*types.Header, error) {
 	var head *types.Header
 	err := ec.c.CallContext(ctx, &head, "eth_getBlockByHash", hash, false)
 	if err == nil && head == nil {
@@ -763,10 +630,150 @@ func (ec *Client) SendTransaction(ctx context.Context, tx *types.Transaction) er
 	return ec.c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Encode(data))
 }
 
+func (ec *Client) getBlockRaw(ctx context.Context, method string, args ...interface{}) (*json.RawMessage, error) {
+	var raw json.RawMessage
+	err := ec.c.CallContext(ctx, &raw, method, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode header and transactions.
+	var head *types.Header
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, err
+	}
+	// When the block is not found, the API returns JSON null.
+	if head == nil {
+		return nil, ethereum.NotFound
+	}
+
+	var body rpcBlock
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	// Quick-verify transaction and uncle lists. This mostly helps with debugging the server.
+	if head.UncleHash == types.EmptyUncleHash && len(body.UncleHashes) > 0 {
+		return nil, errors.New("server returned non-empty uncle list but block header indicates no uncles")
+	}
+	if head.UncleHash != types.EmptyUncleHash && len(body.UncleHashes) == 0 {
+		return nil, errors.New("server returned empty uncle list but block header indicates uncles")
+	}
+	if head.TxHash == types.EmptyTxsHash && len(body.Transactions) > 0 {
+		return nil, errors.New("server returned non-empty transaction list but block header indicates no transactions")
+	}
+	if head.TxHash != types.EmptyTxsHash && len(body.Transactions) == 0 {
+		return nil, errors.New("server returned empty transaction list but block header indicates transactions")
+	}
+
+	return &raw, nil
+}
+
+func (ec *Client) DecodeBlockRaw(raw json.RawMessage, ctx context.Context) (*types.Block, error) {
+	var head *types.Header
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, err
+	}
+	// When the block is not found, the API returns JSON null.
+	if head == nil {
+		return nil, ethereum.NotFound
+	}
+
+	var body rpcBlock
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, err
+	}
+	// Quick-verify transaction and uncle lists. This mostly helps with debugging the server.
+	if head.UncleHash == types.EmptyUncleHash && len(body.UncleHashes) > 0 {
+		return nil, errors.New("server returned non-empty uncle list but block header indicates no uncles")
+	}
+	if head.UncleHash != types.EmptyUncleHash && len(body.UncleHashes) == 0 {
+		return nil, errors.New("server returned empty uncle list but block header indicates uncles")
+	}
+	if head.TxHash == types.EmptyTxsHash && len(body.Transactions) > 0 {
+		return nil, errors.New("server returned non-empty transaction list but block header indicates no transactions")
+	}
+	if head.TxHash != types.EmptyTxsHash && len(body.Transactions) == 0 {
+		return nil, errors.New("server returned empty transaction list but block header indicates transactions")
+	}
+
+	var uncles []*types.Header
+	if ctx != nil {
+		if len(body.UncleHashes) > 0 {
+			uncles = make([]*types.Header, len(body.UncleHashes))
+			reqs := make([]rpc.BatchElem, len(body.UncleHashes))
+			for i := range reqs {
+				reqs[i] = rpc.BatchElem{
+					Method: "eth_getUncleByBlockHashAndIndex",
+					Args:   []interface{}{body.Hash, hexutil.EncodeUint64(uint64(i))},
+					Result: &uncles[i],
+				}
+			}
+			if err := ec.c.BatchCallContext(ctx, reqs); err != nil {
+				return nil, err
+			}
+			for i := range reqs {
+				if reqs[i].Error != nil {
+					return nil, reqs[i].Error
+				}
+				if uncles[i] == nil {
+					return nil, fmt.Errorf("got null header for uncle %d of block %x", i, body.Hash[:])
+				}
+			}
+		}
+	}
+	// Fill the sender cache of transactions in the block.
+	txs := make([]*types.Transaction, len(body.Transactions))
+	for i, tx := range body.Transactions {
+		if tx.From != nil {
+			setSenderFromServer(tx.tx, *tx.From, body.Hash)
+		}
+		txs[i] = tx.tx
+	}
+	return types.NewBlockWithHeader(head).WithBody(
+		types.Body{
+			Transactions: txs,
+			Uncles:       uncles,
+			Withdrawals:  body.Withdrawals,
+		}), nil
+}
+
+func (ec *Client) BlockByStringHash(ctx context.Context, hash string) (*types.Block, error) {
+	return ec.getBlock(ctx, "eth_getBlockByHash", hash, true)
+}
+
+func (ec *Client) BlockByStringHashRaw(ctx context.Context, hash string) (*json.RawMessage, error) {
+	return ec.getBlockRaw(ctx, "eth_getBlockByHash", hash, true)
+}
+
+func (ec *Client) BlockByNumberAndRank(ctx context.Context, number *big.Int, rank uint64) (*types.Block, error) {
+	return ec.getBlock(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
+}
+
+func (ec *Client) BlockByNumberAndRankRaw(ctx context.Context, number *big.Int, rank uint64) (*json.RawMessage, error) {
+	return ec.getBlockRaw(ctx, "eth_getBlockByNumberAndRank", toBlockNumArg(number), true, hexutil.Uint64(rank).String())
+}
+
 func (ec *Client) GetPendingTransactions(ctx context.Context) (json.RawMessage, error) {
 	var res json.RawMessage
 	var err = ec.c.CallContext(ctx, &res, "txpool_besuPendingTransactions", nil)
 	return res, err
+}
+
+// RevertErrorData returns the 'revert reason' data of a contract call.
+//
+// This can be used with CallContract and EstimateGas, and only when the server is Geth.
+func RevertErrorData(err error) ([]byte, bool) {
+	var ec rpc.Error
+	var ed rpc.DataError
+	if errors.As(err, &ec) && errors.As(err, &ed) && ec.ErrorCode() == 3 {
+		if eds, ok := ed.ErrorData().(string); ok {
+			revertData, err := hexutil.Decode(eds)
+			if err == nil {
+				return revertData, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func toBlockNumArg(number *big.Int) string {

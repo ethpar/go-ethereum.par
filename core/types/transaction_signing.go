@@ -66,24 +66,26 @@ func MakeSigner(config *params.ChainConfig, blockNumber *big.Int, blockTime uint
 // Use this in transaction-handling code where the current block number is unknown. If you
 // have the current block number available, use MakeSigner instead.
 func LatestSigner(config *params.ChainConfig) Signer {
+	var signer Signer
 	if config.ChainID != nil {
-		if config.PragueTime != nil {
-			return NewPragueSigner(config.ChainID)
+		switch {
+		case config.PragueTime != nil:
+			signer = NewPragueSigner(config.ChainID)
+		case config.CancunTime != nil:
+			signer = NewCancunSigner(config.ChainID)
+		case config.LondonBlock != nil:
+			signer = NewLondonSigner(config.ChainID)
+		case config.BerlinBlock != nil:
+			signer = NewEIP2930Signer(config.ChainID)
+		case config.EIP155Block != nil:
+			signer = NewEIP155Signer(config.ChainID)
+		default:
+			signer = HomesteadSigner{}
 		}
-		if config.CancunTime != nil {
-			return NewCancunSigner(config.ChainID)
-		}
-		if config.LondonBlock != nil {
-			return NewLondonSigner(config.ChainID)
-		}
-		if config.BerlinBlock != nil {
-			return NewEIP2930Signer(config.ChainID)
-		}
-		if config.EIP155Block != nil {
-			return NewEIP155Signer(config.ChainID)
-		}
+	} else {
+		signer = HomesteadSigner{}
 	}
-	return HomesteadSigner{}
+	return signer
 }
 
 // LatestSignerForChainID returns the 'most permissive' Signer available. Specifically,
@@ -94,10 +96,13 @@ func LatestSigner(config *params.ChainConfig) Signer {
 // configuration are unknown. If you have a ChainConfig, use LatestSigner instead.
 // If you have a ChainConfig and know the current block number, use MakeSigner instead.
 func LatestSignerForChainID(chainID *big.Int) Signer {
-	if chainID == nil {
-		return HomesteadSigner{}
+	var signer Signer
+	if chainID != nil {
+		signer = NewPragueSigner(chainID)
+	} else {
+		signer = HomesteadSigner{}
 	}
-	return NewCancunSigner(chainID)
+	return signer
 }
 
 // SignTx signs the transaction using the given signer and private key.
@@ -183,7 +188,8 @@ type pragueSigner struct{ cancunSigner }
 // - EIP-155 replay protected transactions, and
 // - legacy Homestead transactions.
 func NewPragueSigner(chainId *big.Int) Signer {
-	return pragueSigner{cancunSigner{londonSigner{eip2930Signer{NewEIP155Signer(chainId)}}}}
+	signer, _ := NewCancunSigner(chainId).(cancunSigner)
+	return pragueSigner{signer}
 }
 
 func (s pragueSigner) Sender(tx *Transaction) (common.Address, error) {
@@ -213,7 +219,7 @@ func (s pragueSigner) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big
 	}
 	// Check that chain ID of tx matches the signer. We also accept ID zero here,
 	// because it indicates that the chain ID was not specified in the tx.
-	if txdata.ChainID.Sign() != 0 && txdata.ChainID.ToBig().Cmp(s.chainId) != 0 {
+	if txdata.ChainID != 0 && new(big.Int).SetUint64(txdata.ChainID).Cmp(s.chainId) != 0 {
 		return nil, nil, nil, fmt.Errorf("%w: have %d want %d", ErrInvalidChainId, txdata.ChainID, s.chainId)
 	}
 	R, S, _ = decodeSignature(sig)
@@ -239,7 +245,7 @@ func (s pragueSigner) Hash(tx *Transaction) common.Hash {
 			tx.Value(),
 			tx.Data(),
 			tx.AccessList(),
-			tx.AuthList(),
+			tx.SetCodeAuthorizations(),
 		})
 }
 

@@ -363,13 +363,6 @@ func (c *Client) CallContext(ctx context.Context, result interface{}, method str
 		return err
 	}
 	resp := batchresp[0]
-	if method == "eth_getBlockByNumberAndRank" {
-		if resp.Error != nil {
-			log.Info("RPC error", "err", resp.Error)
-			return resp.Error
-		}
-		log.Info("RPC client reconnect failed", "err", resp.Result)
-	}
 	switch {
 	case resp.Error != nil:
 		return resp.Error

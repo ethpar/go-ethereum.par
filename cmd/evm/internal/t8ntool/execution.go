@@ -23,6 +23,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -50,26 +51,30 @@ type Prestate struct {
 	Pre types.GenesisAlloc `json:"pre"`
 }
 
+//go:generate go run github.com/fjl/gencodec -type ExecutionResult -field-override executionResultMarshaling -out gen_execresult.go
+
 // ExecutionResult contains the execution status after running a state test, any
 // error that might have occurred and a dump of the final state if requested.
 type ExecutionResult struct {
-	StateRoot             common.Hash                 `json:"stateRoot"`
-	TxRoot                common.Hash                 `json:"txRoot"`
-	ReceiptRoot           common.Hash                 `json:"receiptsRoot"`
-	LogsHash              common.Hash                 `json:"logsHash"`
-	Bloom                 types.Bloom                 `json:"logsBloom"        gencodec:"required"`
-	Receipts              types.Receipts              `json:"receipts"`
-	Rejected              []*rejectedTx               `json:"rejected,omitempty"`
-	Difficulty            *math.HexOrDecimal256       `json:"currentDifficulty" gencodec:"required"`
-	GasUsed               math.HexOrDecimal64         `json:"gasUsed"`
-	BaseFee               *math.HexOrDecimal256       `json:"currentBaseFee,omitempty"`
-	WithdrawalsRoot       *common.Hash                `json:"withdrawalsRoot,omitempty"`
-	CurrentExcessBlobGas  *math.HexOrDecimal64        `json:"currentExcessBlobGas,omitempty"`
-	CurrentBlobGasUsed    *math.HexOrDecimal64        `json:"blobGasUsed,omitempty"`
-	RequestsHash          *common.Hash                `json:"requestsRoot,omitempty"`
-	DepositRequests       types.Deposits              `json:"depositRequests,omitempty"`
-	WithdrawalRequests    types.WithdrawalRequests    `json:"withdrawalRequests,omitempty"`
-	ConsolidationRequests types.ConsolidationRequests `json:"consolidationRequests,omitempty"`
+	StateRoot            common.Hash           `json:"stateRoot"`
+	TxRoot               common.Hash           `json:"txRoot"`
+	ReceiptRoot          common.Hash           `json:"receiptsRoot"`
+	LogsHash             common.Hash           `json:"logsHash"`
+	Bloom                types.Bloom           `json:"logsBloom"        gencodec:"required"`
+	Receipts             types.Receipts        `json:"receipts"`
+	Rejected             []*rejectedTx         `json:"rejected,omitempty"`
+	Difficulty           *math.HexOrDecimal256 `json:"currentDifficulty" gencodec:"required"`
+	GasUsed              math.HexOrDecimal64   `json:"gasUsed"`
+	BaseFee              *math.HexOrDecimal256 `json:"currentBaseFee,omitempty"`
+	WithdrawalsRoot      *common.Hash          `json:"withdrawalsRoot,omitempty"`
+	CurrentExcessBlobGas *math.HexOrDecimal64  `json:"currentExcessBlobGas,omitempty"`
+	CurrentBlobGasUsed   *math.HexOrDecimal64  `json:"blobGasUsed,omitempty"`
+	RequestsHash         *common.Hash          `json:"requestsHash,omitempty"`
+	Requests             [][]byte              `json:"requests"`
+}
+
+type executionResultMarshaling struct {
+	Requests []hexutil.Bytes `json:"requests"`
 }
 
 type ommer struct {
@@ -127,7 +132,7 @@ type rejectedTx struct {
 // Apply applies a set of transactions to a pre-state
 func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 	txIt txIterator, miningReward int64,
-	getTracerFn func(txIndex int, txHash common.Hash) (*tracers.Tracer, io.WriteCloser, error)) (*state.StateDB, *ExecutionResult, []byte, error) {
+	getTracerFn func(txIndex int, txHash common.Hash, chainConfig *params.ChainConfig) (*tracers.Tracer, io.WriteCloser, error)) (*state.StateDB, *ExecutionResult, []byte, error) {
 	// Capture errors for BLOCKHASH operation, if we haven't been supplied the
 	// required blockhashes
 	var hashError error
@@ -174,19 +179,20 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		rnd := common.BigToHash(pre.Env.Random)
 		vmContext.Random = &rnd
 	}
+	isPrague := chainConfig.IsPrague(vmContext.BlockNumber, vmContext.Time)
 	// Calculate the BlobBaseFee
 	var excessBlobGas uint64
 	if pre.Env.ExcessBlobGas != nil {
 		excessBlobGas = *pre.Env.ExcessBlobGas
-		vmContext.BlobBaseFee = eip4844.CalcBlobFee(excessBlobGas)
+		vmContext.BlobBaseFee = eip4844.CalcBlobFee(excessBlobGas, isPrague)
 	} else {
 		// If it is not explicitly defined, but we have the parent values, we try
 		// to calculate it ourselves.
 		parentExcessBlobGas := pre.Env.ParentExcessBlobGas
 		parentBlobGasUsed := pre.Env.ParentBlobGasUsed
 		if parentExcessBlobGas != nil && parentBlobGasUsed != nil {
-			excessBlobGas = eip4844.CalcExcessBlobGas(*parentExcessBlobGas, *parentBlobGasUsed)
-			vmContext.BlobBaseFee = eip4844.CalcBlobFee(excessBlobGas)
+			excessBlobGas = eip4844.CalcExcessBlobGas(*parentExcessBlobGas, *parentBlobGasUsed, isPrague)
+			vmContext.BlobBaseFee = eip4844.CalcBlobFee(excessBlobGas, isPrague)
 		}
 	}
 	// If DAO is supported/enabled, we need to handle it here. In geth 'proper', it's
@@ -196,17 +202,16 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		chainConfig.DAOForkBlock.Cmp(new(big.Int).SetUint64(pre.Env.Number)) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
+	evm := vm.NewEVM(vmContext, statedb, chainConfig, vmConfig)
 	if beaconRoot := pre.Env.ParentBeaconBlockRoot; beaconRoot != nil {
-		evm := vm.NewEVM(vmContext, vm.TxContext{}, statedb, chainConfig, vmConfig)
-		core.ProcessBeaconBlockRoot(*beaconRoot, evm, statedb)
+		core.ProcessBeaconBlockRoot(*beaconRoot, evm)
 	}
-	if pre.Env.BlockHashes != nil && chainConfig.IsPrague(new(big.Int).SetUint64(pre.Env.Number), pre.Env.Timestamp) {
+	if pre.Env.BlockHashes != nil && isPrague {
 		var (
 			prevNumber = pre.Env.Number - 1
 			prevHash   = pre.Env.BlockHashes[math.HexOrDecimal64(prevNumber)]
-			evm        = vm.NewEVM(vmContext, vm.TxContext{}, statedb, chainConfig, vmConfig)
 		)
-		core.ProcessParentBlockHash(prevHash, evm, statedb)
+		core.ProcessParentBlockHash(prevHash, evm)
 	}
 	for i := 0; txIt.Next(); i++ {
 		tx, err := txIt.Tx()
@@ -230,29 +235,32 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		txBlobGas := uint64(0)
 		if tx.Type() == types.BlobTxType {
 			txBlobGas = uint64(params.BlobTxBlobGasPerBlob * len(tx.BlobHashes()))
-			if used, max := blobGasUsed+txBlobGas, uint64(params.MaxBlobGasPerBlock); used > max {
+			maxBlobs := uint64(params.MaxBlobGasPerBlock / params.BlobTxBlobGasPerBlob)
+			if isPrague {
+				maxBlobs = uint64(params.MaxBlobGasPerBlockEIP7691 / params.BlobTxBlobGasPerBlob)
+			}
+			if used, max := blobGasUsed+txBlobGas, maxBlobs; used > max {
 				err := fmt.Errorf("blob gas (%d) would exceed maximum allowance %d", used, max)
 				log.Warn("rejected tx", "index", i, "err", err)
 				rejectedTxs = append(rejectedTxs, &rejectedTx{i, err.Error()})
 				continue
 			}
 		}
-		tracer, traceOutput, err := getTracerFn(txIndex, tx.Hash())
+		tracer, traceOutput, err := getTracerFn(txIndex, tx.Hash(), chainConfig)
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		// TODO (rjl493456442) it's a bit weird to reset the tracer in the
+		// middle of block execution, please improve it somehow.
 		if tracer != nil {
-			vmConfig.Tracer = tracer.Hooks
+			evm.SetTracer(tracer.Hooks)
 		}
 		statedb.SetTxContext(tx.Hash(), txIndex)
 
 		var (
-			txContext = core.NewEVMTxContext(msg)
-			snapshot  = statedb.Snapshot()
-			prevGas   = gaspool.Gas()
+			snapshot = statedb.Snapshot()
+			prevGas  = gaspool.Gas()
 		)
-		evm := vm.NewEVM(vmContext, txContext, statedb, chainConfig, vmConfig)
-
 		if tracer != nil && tracer.OnTxStart != nil {
 			tracer.OnTxStart(evm.GetVMContext(), tx, msg.From)
 		}
@@ -356,69 +364,41 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		amount := new(big.Int).Mul(new(big.Int).SetUint64(w.Amount), big.NewInt(params.GWei))
 		statedb.AddBalance(w.Address, uint256.MustFromBig(amount), tracing.BalanceIncreaseWithdrawal)
 	}
-	// Retrieve deposit and withdrawal requests
-	var (
-		depositRequests       types.Deposits
-		withdrawalRequests    types.WithdrawalRequests
-		consolidationRequests types.ConsolidationRequests
-		requestsHash          *common.Hash
-	)
-	if chainConfig.IsPrague(vmContext.BlockNumber, vmContext.Time) {
-		// Parse deposit requests from the logs
+
+	// Gather the execution-layer triggered requests.
+	var requests [][]byte
+	if isPrague {
+		requests = [][]byte{}
+		// EIP-6110
 		var allLogs []*types.Log
 		for _, receipt := range receipts {
 			allLogs = append(allLogs, receipt.Logs...)
 		}
-		requests, err := core.ParseDepositLogs(allLogs, chainConfig)
-		if err != nil {
+		if err := core.ParseDepositLogs(&requests, allLogs, chainConfig); err != nil {
 			return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not parse requests logs: %v", err))
 		}
-		// Process the withdrawal requests contract execution
-		vmenv := vm.NewEVM(vmContext, vm.TxContext{}, statedb, chainConfig, vmConfig)
-		wxs := core.ProcessDequeueWithdrawalRequests(vmenv, statedb)
-		requests = append(requests, wxs...)
-		// Process the consolidation requests contract execution
-		cxs := core.ProcessDequeueConsolidationRequests(vmenv, statedb)
-		requests = append(requests, cxs...)
-		// Calculate the requests root
-		h := types.DeriveSha(requests, trie.NewStackTrie(nil))
-		requestsHash = &h
-
-		// Break out individual request types.
-		depositRequests = make(types.Deposits, 0)
-		withdrawalRequests = make(types.WithdrawalRequests, 0)
-		consolidationRequests = make(types.ConsolidationRequests, 0)
-		for _, req := range requests {
-			switch v := req.Inner().(type) {
-			case *types.Deposit:
-				depositRequests = append(depositRequests, v)
-			case *types.WithdrawalRequest:
-				withdrawalRequests = append(withdrawalRequests, v)
-			case *types.ConsolidationRequest:
-				consolidationRequests = append(consolidationRequests, v)
-			}
-		}
+		// EIP-7002
+		core.ProcessWithdrawalQueue(&requests, evm)
+		// EIP-7251
+		core.ProcessConsolidationQueue(&requests, evm)
 	}
+
 	// Commit block
 	root, err := statedb.Commit(vmContext.BlockNumber.Uint64(), chainConfig.IsEIP158(vmContext.BlockNumber))
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not commit state: %v", err))
 	}
 	execRs := &ExecutionResult{
-		StateRoot:             root,
-		TxRoot:                types.DeriveSha(includedTxs, trie.NewStackTrie(nil)),
-		ReceiptRoot:           types.DeriveSha(receipts, trie.NewStackTrie(nil)),
-		Bloom:                 types.CreateBloom(receipts),
-		LogsHash:              rlpHash(statedb.Logs()),
-		Receipts:              receipts,
-		Rejected:              rejectedTxs,
-		Difficulty:            (*math.HexOrDecimal256)(vmContext.Difficulty),
-		GasUsed:               (math.HexOrDecimal64)(gasUsed),
-		BaseFee:               (*math.HexOrDecimal256)(vmContext.BaseFee),
-		RequestsHash:          requestsHash,
-		DepositRequests:       depositRequests,
-		WithdrawalRequests:    withdrawalRequests,
-		ConsolidationRequests: consolidationRequests,
+		StateRoot:   root,
+		TxRoot:      types.DeriveSha(includedTxs, trie.NewStackTrie(nil)),
+		ReceiptRoot: types.DeriveSha(receipts, trie.NewStackTrie(nil)),
+		Bloom:       types.CreateBloom(receipts),
+		LogsHash:    rlpHash(statedb.Logs()),
+		Receipts:    receipts,
+		Rejected:    rejectedTxs,
+		Difficulty:  (*math.HexOrDecimal256)(vmContext.Difficulty),
+		GasUsed:     (math.HexOrDecimal64)(gasUsed),
+		BaseFee:     (*math.HexOrDecimal256)(vmContext.BaseFee),
 	}
 	if pre.Env.Withdrawals != nil {
 		h := types.DeriveSha(types.Withdrawals(pre.Env.Withdrawals), trie.NewStackTrie(nil))
@@ -428,9 +408,20 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		execRs.CurrentExcessBlobGas = (*math.HexOrDecimal64)(&excessBlobGas)
 		execRs.CurrentBlobGasUsed = (*math.HexOrDecimal64)(&blobGasUsed)
 	}
+	if requests != nil {
+		// Set requestsHash on block.
+		h := types.CalcRequestsHash(requests)
+		execRs.RequestsHash = &h
+		for i := range requests {
+			// remove prefix
+			requests[i] = requests[i][1:]
+		}
+		execRs.Requests = requests
+	}
+
 	// Re-create statedb instance with new root upon the updated database
 	// for accessing latest states.
-	statedb, err = state.New(root, statedb.Database(), nil)
+	statedb, err = state.New(root, statedb.Database())
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not reopen state: %v", err))
 	}
@@ -439,8 +430,9 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 }
 
 func MakePreState(db ethdb.Database, accounts types.GenesisAlloc) *state.StateDB {
-	sdb := state.NewDatabaseWithConfig(db, &triedb.Config{Preimages: true})
-	statedb, _ := state.New(types.EmptyRootHash, sdb, nil)
+	tdb := triedb.NewDatabase(db, &triedb.Config{Preimages: true})
+	sdb := state.NewDatabase(tdb, nil)
+	statedb, _ := state.New(types.EmptyRootHash, sdb)
 	for addr, a := range accounts {
 		statedb.SetCode(addr, a.Code)
 		statedb.SetNonce(addr, a.Nonce)
@@ -451,7 +443,7 @@ func MakePreState(db ethdb.Database, accounts types.GenesisAlloc) *state.StateDB
 	}
 	// Commit and re-open to start with a clean state.
 	root, _ := statedb.Commit(0, false)
-	statedb, _ = state.New(root, sdb, nil)
+	statedb, _ = state.New(root, sdb)
 	return statedb
 }
 
