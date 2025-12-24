@@ -83,8 +83,8 @@ var (
 	}
 	TraceFormatFlag = &cli.StringFlag{
 		Name:     "trace.format",
-		Usage:    "Trace output format to use (struct|json)",
-		Value:    "struct",
+		Usage:    "Trace output format to use (json|struct|md)",
+		Value:    "json",
 		Category: traceCategory,
 	}
 	TraceDisableMemoryFlag = &cli.BoolFlag{
@@ -210,8 +210,6 @@ func init() {
 		stateTransitionCommand,
 		transactionCommand,
 		blockBuilderCommand,
-		eofParseCommand,
-		eofDumpCommand,
 	}
 	app.Before = func(ctx *cli.Context) error {
 		flags.MigrateGlobalFlags(ctx)

@@ -31,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -84,10 +83,7 @@ type txGasAndReward struct {
 // the block field filled in, retrieves the block from the backend if not present yet and
 // fills in the rest of the fields.
 func (oracle *Oracle) processBlock(bf *blockFees, percentiles []float64) {
-	var (
-		config   = oracle.backend.ChainConfig()
-		isPrague = config.IsPrague(bf.header.Number, bf.header.Time)
-	)
+	config := oracle.backend.ChainConfig()
 
 	// Fill in base fee and next base fee.
 	if bf.results.baseFee = bf.header.BaseFee; bf.results.baseFee == nil {
@@ -100,8 +96,10 @@ func (oracle *Oracle) processBlock(bf *blockFees, percentiles []float64) {
 	}
 	// Fill in blob base fee and next blob base fee.
 	if excessBlobGas := bf.header.ExcessBlobGas; excessBlobGas != nil {
-		bf.results.blobBaseFee = eip4844.CalcBlobFee(*excessBlobGas, isPrague)
-		bf.results.nextBlobBaseFee = eip4844.CalcBlobFee(eip4844.CalcExcessBlobGas(*excessBlobGas, *bf.header.BlobGasUsed, isPrague), isPrague)
+		bf.results.blobBaseFee = eip4844.CalcBlobFee(config, bf.header)
+		excess := eip4844.CalcExcessBlobGas(config, bf.header, bf.header.Time)
+		next := &types.Header{Number: bf.header.Number, Time: bf.header.Time, ExcessBlobGas: &excess}
+		bf.results.nextBlobBaseFee = eip4844.CalcBlobFee(config, next)
 	} else {
 		bf.results.blobBaseFee = new(big.Int)
 		bf.results.nextBlobBaseFee = new(big.Int)
@@ -109,10 +107,9 @@ func (oracle *Oracle) processBlock(bf *blockFees, percentiles []float64) {
 	// Compute gas used ratio for normal and blob gas.
 	bf.results.gasUsedRatio = float64(bf.header.GasUsed) / float64(bf.header.GasLimit)
 	if blobGasUsed := bf.header.BlobGasUsed; blobGasUsed != nil {
-		if isPrague {
-			bf.results.blobGasUsedRatio = float64(*blobGasUsed) / params.MaxBlobGasPerBlockEIP7691
-		} else {
-			bf.results.blobGasUsedRatio = float64(*blobGasUsed) / params.MaxBlobGasPerBlock
+		maxBlobGas := eip4844.MaxBlobGasPerBlock(config, bf.header.Time)
+		if maxBlobGas != 0 {
+			bf.results.blobGasUsedRatio = float64(*blobGasUsed) / float64(maxBlobGas)
 		}
 	}
 

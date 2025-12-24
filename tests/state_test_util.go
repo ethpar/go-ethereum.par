@@ -141,7 +141,7 @@ type stTransactionMarshaling struct {
 
 // Authorization is an authorization from an account to deploy code at it's address.
 type stAuthorization struct {
-	ChainID uint64
+	ChainID *big.Int       `json:"chainId" gencodec:"required"`
 	Address common.Address `json:"address" gencodec:"required"`
 	Nonce   uint64         `json:"nonce" gencodec:"required"`
 	V       uint8          `json:"v" gencodec:"required"`
@@ -151,7 +151,7 @@ type stAuthorization struct {
 
 // field type overrides for gencodec
 type stAuthorizationMarshaling struct {
-	ChainID math.HexOrDecimal64
+	ChainID *math.HexOrDecimal256
 	Nonce   math.HexOrDecimal64
 	V       math.HexOrDecimal64
 	R       *math.HexOrDecimal256
@@ -276,17 +276,14 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		return st, common.Hash{}, 0, err
 	}
 
-	{ // Blob transactions may be present after the Cancun fork.
-		// In production,
-		// - the header is verified against the max in eip4844.go:VerifyEIP4844Header
-		// - the block body is verified against the header in block_validator.go:ValidateBody
-		// Here, we just do this shortcut smaller fix, since state tests do not
-		// utilize those codepaths
-		maxBlobs := params.MaxBlobGasPerBlock
-		if config.IsPrague(block.Number(), block.Time()) {
-			maxBlobs = params.MaxBlobGasPerBlockEIP7691
-		}
-		if len(msg.BlobHashes)*params.BlobTxBlobGasPerBlob > maxBlobs {
+	// Blob transactions may be present after the Cancun fork.
+	// In production,
+	// - the header is verified against the max in eip4844.go:VerifyEIP4844Header
+	// - the block body is verified against the header in block_validator.go:ValidateBody
+	// Here, we just do this shortcut smaller fix, since state tests do not
+	// utilize those codepaths.
+	if config.IsCancun(new(big.Int), block.Time()) {
+		if len(msg.BlobHashes) > eip4844.MaxBlobsPerBlock(config, block.Time()) {
 			return st, common.Hash{}, 0, errors.New("blob gas exceeds maximum")
 		}
 	}
@@ -303,9 +300,8 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		}
 	}
 
-	chainctx := &chainContext{config: config}
 	// Prepare the EVM.
-	context := core.NewEVMBlockContext(block.Header(), chainctx, &t.json.Env.Coinbase)
+	context := core.NewEVMBlockContext(block.Header(), &dummyChain{config: config}, &t.json.Env.Coinbase)
 	context.GetHash = vmTestBlockHash
 	context.BaseFee = baseFee
 	context.Random = nil
@@ -318,8 +314,13 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 		context.Difficulty = big.NewInt(0)
 	}
 	if config.IsCancun(new(big.Int), block.Time()) && t.json.Env.ExcessBlobGas != nil {
-		context.BlobBaseFee = eip4844.CalcBlobFee(*t.json.Env.ExcessBlobGas, config.IsPrague(block.Number(), block.Time()))
+		header := &types.Header{
+			Time:          block.Time(),
+			ExcessBlobGas: t.json.Env.ExcessBlobGas,
+		}
+		context.BlobBaseFee = eip4844.CalcBlobFee(config, header)
 	}
+
 	evm := vm.NewEVM(context, st.StateDB, config, vmconfig)
 
 	if tracer := vmconfig.Tracer; tracer != nil && tracer.OnTxStart != nil {
@@ -345,7 +346,7 @@ func (t *StateTest) RunNoVerify(subtest StateSubtest, vmconfig vm.Config, snapsh
 	st.StateDB.AddBalance(block.Coinbase(), new(uint256.Int), tracing.BalanceChangeUnspecified)
 
 	// Commit state mutations into database.
-	root, _ = st.StateDB.Commit(block.NumberU64(), config.IsEIP158(block.Number()))
+	root, _ = st.StateDB.Commit(block.NumberU64(), config.IsEIP158(block.Number()), config.IsCancun(block.Number(), block.Time()))
 	if tracer := evm.Config.Tracer; tracer != nil && tracer.OnTxEnd != nil {
 		receipt := &types.Receipt{GasUsed: vmRet.UsedGas}
 		tracer.OnTxEnd(receipt, nil)
@@ -452,7 +453,7 @@ func (tx *stTransaction) toMessage(ps stPostState, baseFee *big.Int) (*core.Mess
 		authList = make([]types.SetCodeAuthorization, len(tx.AuthorizationList))
 		for i, auth := range tx.AuthorizationList {
 			authList[i] = types.SetCodeAuthorization{
-				ChainID: auth.ChainID,
+				ChainID: *uint256.MustFromBig(auth.ChainID),
 				Address: auth.Address,
 				Nonce:   auth.Nonce,
 				V:       auth.V,
@@ -510,19 +511,19 @@ func MakePreState(db ethdb.Database, accounts types.GenesisAlloc, snapshotter bo
 	sdb := state.NewDatabase(triedb, nil)
 	statedb, _ := state.New(types.EmptyRootHash, sdb)
 	for addr, a := range accounts {
-		statedb.SetCode(addr, a.Code)
-		statedb.SetNonce(addr, a.Nonce)
+		statedb.SetCode(addr, a.Code, tracing.CodeChangeUnspecified)
+		statedb.SetNonce(addr, a.Nonce, tracing.NonceChangeUnspecified)
 		statedb.SetBalance(addr, uint256.MustFromBig(a.Balance), tracing.BalanceChangeUnspecified)
 		for k, v := range a.Storage {
 			statedb.SetState(addr, k, v)
 		}
 	}
 	// Commit and re-open to start with a clean state.
-	root, _ := statedb.Commit(0, false)
+	root, _ := statedb.Commit(0, false, false)
 
 	// If snapshot is requested, initialize the snapshotter and use it in state.
 	var snaps *snapshot.Tree
-	if snapshotter {
+	if snapshotter && scheme == rawdb.HashScheme {
 		snapconfig := snapshot.Config{
 			CacheSize:  1,
 			Recovery:   false,
@@ -550,18 +551,11 @@ func (st *StateTestState) Close() {
 	}
 }
 
-type chainContext struct {
+// dummyChain implements the core.ChainContext interface.
+type dummyChain struct {
 	config *params.ChainConfig
 }
 
-func (c *chainContext) Engine() consensus.Engine {
-	return nil
-}
-
-func (c *chainContext) GetHeader(common.Hash, uint64) *types.Header {
-	return nil
-}
-
-func (c *chainContext) Config() *params.ChainConfig {
-	return c.config
-}
+func (d *dummyChain) Engine() consensus.Engine                        { return nil }
+func (d *dummyChain) GetHeader(h common.Hash, n uint64) *types.Header { return nil }
+func (d *dummyChain) Config() *params.ChainConfig                     { return d.config }

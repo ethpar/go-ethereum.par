@@ -124,6 +124,7 @@ func (s *stateObject) touch() {
 // subsequent reads to expand the same trie instead of reloading from disk.
 func (s *stateObject) getTrie() (Trie, error) {
 	if s.trie == nil {
+		// Assumes the primary account trie is already loaded
 		tr, err := s.db.db.OpenStorageTrie(s.db.originalRoot, s.address, s.data.Root, s.db.trie)
 		if err != nil {
 			return nil, err
@@ -332,7 +333,7 @@ func (s *stateObject) updateTrie() (Trie, error) {
 			continue
 		}
 		if !exist {
-			log.Error("Storage slot is not found in pending area", s.address, "slot", key)
+			log.Error("Storage slot is not found in pending area", "address", s.address, "slot", key)
 			continue
 		}
 		if (value != common.Hash{}) {
@@ -377,7 +378,6 @@ func (s *stateObject) updateRoot() {
 // fulfills the storage diffs into the given accountUpdate struct.
 func (s *stateObject) commitStorage(op *accountUpdate) {
 	var (
-		buf    = crypto.NewKeccakState()
 		encode = func(val common.Hash) []byte {
 			if val == (common.Hash{}) {
 				return nil
@@ -394,15 +394,21 @@ func (s *stateObject) commitStorage(op *accountUpdate) {
 		if val == s.originStorage[key] {
 			continue
 		}
-		hash := crypto.HashData(buf, key[:])
+		hash := crypto.Keccak256Hash(key[:])
 		if op.storages == nil {
 			op.storages = make(map[common.Hash][]byte)
 		}
 		op.storages[hash] = encode(val)
-		if op.storagesOrigin == nil {
-			op.storagesOrigin = make(map[common.Hash][]byte)
+
+		if op.storagesOriginByKey == nil {
+			op.storagesOriginByKey = make(map[common.Hash][]byte)
 		}
-		op.storagesOrigin[hash] = encode(s.originStorage[key])
+		if op.storagesOriginByHash == nil {
+			op.storagesOriginByHash = make(map[common.Hash][]byte)
+		}
+		origin := encode(s.originStorage[key])
+		op.storagesOriginByKey[key] = origin
+		op.storagesOriginByHash[hash] = origin
 
 		// Overwrite the clean value of storage slots
 		s.originStorage[key] = val

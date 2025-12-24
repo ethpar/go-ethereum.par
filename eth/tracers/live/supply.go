@@ -168,8 +168,7 @@ func (s *supplyTracer) onBlockStart(ev tracing.BlockEvent) {
 	// Blob burnt gas
 	if blobGas := ev.Block.BlobGasUsed(); blobGas != nil && *blobGas > 0 && ev.Block.ExcessBlobGas() != nil {
 		var (
-			excess  = *ev.Block.ExcessBlobGas()
-			baseFee = eip4844.CalcBlobFee(excess, s.chainConfig.IsPrague(ev.Block.Number(), ev.Block.Time()))
+			baseFee = eip4844.CalcBlobFee(s.chainConfig, ev.Block.Header())
 			burn    = new(big.Int).Mul(new(big.Int).SetUint64(*blobGas), baseFee)
 		)
 		s.delta.Burn.Blob = burn
@@ -200,8 +199,7 @@ func (s *supplyTracer) onBalanceChange(a common.Address, prevBalance, newBalance
 
 	// NOTE: don't handle "BalanceIncreaseGenesisBalance" because it is handled in OnGenesisBlock
 	switch reason {
-	case tracing.BalanceIncreaseRewardMineUncle:
-	case tracing.BalanceIncreaseRewardMineBlock:
+	case tracing.BalanceIncreaseRewardMineBlock, tracing.BalanceIncreaseRewardMineUncle:
 		s.delta.Issuance.Reward.Add(s.delta.Issuance.Reward, diff)
 	case tracing.BalanceIncreaseWithdrawal:
 		s.delta.Issuance.Withdrawals.Add(s.delta.Issuance.Withdrawals, diff)

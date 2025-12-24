@@ -19,6 +19,7 @@ package logger
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -176,14 +177,18 @@ func (s *StructLog) toLegacyJSON() json.RawMessage {
 	if len(s.ReturnData) > 0 {
 		msg.ReturnData = hexutil.Bytes(s.ReturnData).String()
 	}
-	if s.Memory != nil {
+	if len(s.Memory) > 0 {
 		memory := make([]string, 0, (len(s.Memory)+31)/32)
-		for i := 0; i+32 <= len(s.Memory); i += 32 {
-			memory = append(memory, fmt.Sprintf("%x", s.Memory[i:i+32]))
+		for i := 0; i < len(s.Memory); i += 32 {
+			end := i + 32
+			if end > len(s.Memory) {
+				end = len(s.Memory)
+			}
+			memory = append(memory, fmt.Sprintf("%x", s.Memory[i:end]))
 		}
 		msg.Memory = &memory
 	}
-	if s.Storage != nil {
+	if len(s.Storage) > 0 {
 		storage := make(map[string]string)
 		for i, storageValue := range s.Storage {
 			storage[fmt.Sprintf("%x", i)] = fmt.Sprintf("%x", storageValue)
@@ -217,6 +222,7 @@ type StructLogger struct {
 
 	interrupt atomic.Bool // Atomic flag to signal execution interruption
 	reason    error       // Textual reason for the interruption
+	skip      bool        // skip processing hooks.
 }
 
 // NewStreamingStructLogger returns a new streaming logger.
@@ -240,10 +246,12 @@ func NewStructLogger(cfg *Config) *StructLogger {
 
 func (l *StructLogger) Hooks() *tracing.Hooks {
 	return &tracing.Hooks{
-		OnTxStart: l.OnTxStart,
-		OnTxEnd:   l.OnTxEnd,
-		OnExit:    l.OnExit,
-		OnOpcode:  l.OnOpcode,
+		OnTxStart:           l.OnTxStart,
+		OnTxEnd:             l.OnTxEnd,
+		OnSystemCallStartV2: l.OnSystemCallStart,
+		OnSystemCallEnd:     l.OnSystemCallEnd,
+		OnExit:              l.OnExit,
+		OnOpcode:            l.OnOpcode,
 	}
 }
 
@@ -253,6 +261,10 @@ func (l *StructLogger) Hooks() *tracing.Hooks {
 func (l *StructLogger) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
 	// If tracing was interrupted, exit
 	if l.interrupt.Load() {
+		return
+	}
+	// Processing a system call.
+	if l.skip {
 		return
 	}
 	// check if already accumulated the size of the response.
@@ -320,6 +332,9 @@ func (l *StructLogger) OnExit(depth int, output []byte, gasUsed uint64, err erro
 	if depth != 0 {
 		return
 	}
+	if l.skip {
+		return
+	}
 	l.output = output
 	l.err = err
 	// TODO @holiman, should we output the per-scope output?
@@ -339,14 +354,13 @@ func (l *StructLogger) GetResult() (json.RawMessage, error) {
 	failed := l.err != nil
 	returnData := common.CopyBytes(l.output)
 	// Return data when successful and revert reason when reverted, otherwise empty.
-	returnVal := fmt.Sprintf("%x", returnData)
-	if failed && l.err != vm.ErrExecutionReverted {
-		returnVal = ""
+	if failed && !errors.Is(l.err, vm.ErrExecutionReverted) {
+		returnData = []byte{}
 	}
 	return json.Marshal(&ExecutionResult{
 		Gas:         l.usedGas,
 		Failed:      failed,
-		ReturnValue: returnVal,
+		ReturnValue: returnData,
 		StructLogs:  l.logs,
 	})
 }
@@ -359,6 +373,13 @@ func (l *StructLogger) Stop(err error) {
 
 func (l *StructLogger) OnTxStart(env *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	l.env = env
+}
+func (l *StructLogger) OnSystemCallStart(env *tracing.VMContext) {
+	l.skip = true
+}
+
+func (l *StructLogger) OnSystemCallEnd() {
+	l.skip = false
 }
 
 func (l *StructLogger) OnTxEnd(receipt *types.Receipt, err error) {
@@ -389,9 +410,10 @@ func WriteTrace(writer io.Writer, logs []StructLog) {
 }
 
 type mdLogger struct {
-	out io.Writer
-	cfg *Config
-	env *tracing.VMContext
+	out  io.Writer
+	cfg  *Config
+	env  *tracing.VMContext
+	skip bool
 }
 
 // NewMarkdownLogger creates a logger which outputs information in a format adapted
@@ -406,11 +428,13 @@ func NewMarkdownLogger(cfg *Config, writer io.Writer) *mdLogger {
 
 func (t *mdLogger) Hooks() *tracing.Hooks {
 	return &tracing.Hooks{
-		OnTxStart: t.OnTxStart,
-		OnEnter:   t.OnEnter,
-		OnExit:    t.OnExit,
-		OnOpcode:  t.OnOpcode,
-		OnFault:   t.OnFault,
+		OnTxStart:           t.OnTxStart,
+		OnSystemCallStartV2: t.OnSystemCallStart,
+		OnSystemCallEnd:     t.OnSystemCallEnd,
+		OnEnter:             t.OnEnter,
+		OnExit:              t.OnExit,
+		OnOpcode:            t.OnOpcode,
+		OnFault:             t.OnFault,
 	}
 }
 
@@ -418,7 +442,18 @@ func (t *mdLogger) OnTxStart(env *tracing.VMContext, tx *types.Transaction, from
 	t.env = env
 }
 
+func (t *mdLogger) OnSystemCallStart(env *tracing.VMContext) {
+	t.skip = true
+}
+
+func (t *mdLogger) OnSystemCallEnd() {
+	t.skip = false
+}
+
 func (t *mdLogger) OnEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+	if t.skip {
+		return
+	}
 	if depth != 0 {
 		return
 	}
@@ -446,6 +481,9 @@ func (t *mdLogger) OnEnter(depth int, typ byte, from common.Address, to common.A
 }
 
 func (t *mdLogger) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
+	if t.skip {
+		return
+	}
 	if depth == 0 {
 		fmt.Fprintf(t.out, "\nPost-execution info:\n"+
 			"  - output: `%#x`\n"+
@@ -457,6 +495,9 @@ func (t *mdLogger) OnExit(depth int, output []byte, gasUsed uint64, err error, r
 
 // OnOpcode also tracks SLOAD/SSTORE ops to track storage change.
 func (t *mdLogger) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
+	if t.skip {
+		return
+	}
 	stack := scope.StackData()
 	fmt.Fprintf(t.out, "| %4d  | %10v  |  %3d |%10v |", pc, vm.OpCode(op).String(),
 		cost, t.env.StateDB.GetRefund())
@@ -477,6 +518,9 @@ func (t *mdLogger) OnOpcode(pc uint64, op byte, gas, cost uint64, scope tracing.
 }
 
 func (t *mdLogger) OnFault(pc uint64, op byte, gas, cost uint64, scope tracing.OpContext, depth int, err error) {
+	if t.skip {
+		return
+	}
 	fmt.Fprintf(t.out, "\nError: at pc=%d, op=%v: %v\n", pc, op, err)
 }
 
@@ -486,6 +530,6 @@ func (t *mdLogger) OnFault(pc uint64, op byte, gas, cost uint64, scope tracing.O
 type ExecutionResult struct {
 	Gas         uint64            `json:"gas"`
 	Failed      bool              `json:"failed"`
-	ReturnValue string            `json:"returnValue"`
+	ReturnValue hexutil.Bytes     `json:"returnValue"`
 	StructLogs  []json.RawMessage `json:"structLogs"`
 }
