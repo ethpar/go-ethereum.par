@@ -363,13 +363,6 @@ func (c *Client) CallContext(ctx context.Context, result interface{}, method str
 		return err
 	}
 	resp := batchresp[0]
-	if method == "eth_getBlockByNumberAndRank" {
-		if resp.Error != nil {
-			log.Info("RPC error", "err", resp.Error)
-			return resp.Error
-		}
-		log.Info("RPC client reconnect failed", "err", resp.Result)
-	}
 	switch {
 	case resp.Error != nil:
 		return resp.Error
@@ -492,12 +485,6 @@ func (c *Client) Notify(ctx context.Context, method string, args ...interface{})
 // EthSubscribe registers a subscription under the "eth" namespace.
 func (c *Client) EthSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (*ClientSubscription, error) {
 	return c.Subscribe(ctx, "eth", channel, args...)
-}
-
-// ShhSubscribe registers a subscription under the "shh" namespace.
-// Deprecated: use Subscribe(ctx, "shh", ...).
-func (c *Client) ShhSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (*ClientSubscription, error) {
-	return c.Subscribe(ctx, "shh", channel, args...)
 }
 
 // Subscribe calls the "<namespace>_subscribe" method with the given arguments,

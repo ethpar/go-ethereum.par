@@ -33,10 +33,23 @@ import (
 type PayloadVersion byte
 
 var (
+	// PayloadV1 is the identifier of ExecutionPayloadV1 introduced in paris fork.
+	// https://github.com/ethereum/execution-apis/blob/main/src/engine/paris.md#executionpayloadv1
 	PayloadV1 PayloadVersion = 0x1
+
+	// PayloadV2 is the identifier of ExecutionPayloadV2 introduced in shanghai fork.
+	//
+	// https://github.com/ethereum/execution-apis/blob/main/src/engine/shanghai.md#executionpayloadv2
+	// ExecutionPayloadV2 has the syntax of ExecutionPayloadV1 and appends a
+	// single field: withdrawals.
 	PayloadV2 PayloadVersion = 0x2
+
+	// PayloadV3 is the identifier of ExecutionPayloadV3 introduced in cancun fork.
+	//
+	// https://github.com/ethereum/execution-apis/blob/main/src/engine/cancun.md#executionpayloadv3
+	// ExecutionPayloadV3 has the syntax of ExecutionPayloadV2 and appends the new
+	// fields: blobGasUsed and excessBlobGas.
 	PayloadV3 PayloadVersion = 0x3
-	PayloadV4 PayloadVersion = 0x4
 )
 
 //go:generate go run github.com/fjl/gencodec -type PayloadAttributes -field-override payloadAttributesMarshaling -out gen_blockparams.go
@@ -60,27 +73,24 @@ type payloadAttributesMarshaling struct {
 
 // ExecutableData is the data necessary to execute an EL payload.
 type ExecutableData struct {
-	ParentHash            common.Hash                 `json:"parentHash"    gencodec:"required"`
-	FeeRecipient          common.Address              `json:"feeRecipient"  gencodec:"required"`
-	StateRoot             common.Hash                 `json:"stateRoot"     gencodec:"required"`
-	ReceiptsRoot          common.Hash                 `json:"receiptsRoot"  gencodec:"required"`
-	LogsBloom             []byte                      `json:"logsBloom"     gencodec:"required"`
-	Random                common.Hash                 `json:"prevRandao"    gencodec:"required"`
-	Number                uint64                      `json:"blockNumber"   gencodec:"required"`
-	GasLimit              uint64                      `json:"gasLimit"      gencodec:"required"`
-	GasUsed               uint64                      `json:"gasUsed"       gencodec:"required"`
-	Timestamp             uint64                      `json:"timestamp"     gencodec:"required"`
-	ExtraData             []byte                      `json:"extraData"     gencodec:"required"`
-	BaseFeePerGas         *big.Int                    `json:"baseFeePerGas" gencodec:"required"`
-	BlockHash             common.Hash                 `json:"blockHash"     gencodec:"required"`
-	Transactions          [][]byte                    `json:"transactions"  gencodec:"required"`
-	Withdrawals           []*types.Withdrawal         `json:"withdrawals"`
-	BlobGasUsed           *uint64                     `json:"blobGasUsed"`
-	ExcessBlobGas         *uint64                     `json:"excessBlobGas"`
-	Deposits              types.Deposits              `json:"depositRequests"`
-	WithdrawalRequests    types.WithdrawalRequests    `json:"withdrawalRequests"`
-	ConsolidationRequests types.ConsolidationRequests `json:"consolidationRequests"`
-	ExecutionWitness      *types.ExecutionWitness     `json:"executionWitness,omitempty"`
+	ParentHash       common.Hash             `json:"parentHash"    gencodec:"required"`
+	FeeRecipient     common.Address          `json:"feeRecipient"  gencodec:"required"`
+	StateRoot        common.Hash             `json:"stateRoot"     gencodec:"required"`
+	ReceiptsRoot     common.Hash             `json:"receiptsRoot"  gencodec:"required"`
+	LogsBloom        []byte                  `json:"logsBloom"     gencodec:"required"`
+	Random           common.Hash             `json:"prevRandao"    gencodec:"required"`
+	Number           uint64                  `json:"blockNumber"   gencodec:"required"`
+	GasLimit         uint64                  `json:"gasLimit"      gencodec:"required"`
+	GasUsed          uint64                  `json:"gasUsed"       gencodec:"required"`
+	Timestamp        uint64                  `json:"timestamp"     gencodec:"required"`
+	ExtraData        []byte                  `json:"extraData"     gencodec:"required"`
+	BaseFeePerGas    *big.Int                `json:"baseFeePerGas" gencodec:"required"`
+	BlockHash        common.Hash             `json:"blockHash"     gencodec:"required"`
+	Transactions     [][]byte                `json:"transactions"  gencodec:"required"`
+	Withdrawals      []*types.Withdrawal     `json:"withdrawals"`
+	BlobGasUsed      *uint64                 `json:"blobGasUsed"`
+	ExcessBlobGas    *uint64                 `json:"excessBlobGas"`
+	ExecutionWitness *types.ExecutionWitness `json:"executionWitness,omitempty"`
 }
 
 // JSON type overrides for executableData.
@@ -97,30 +107,57 @@ type executableDataMarshaling struct {
 	ExcessBlobGas *hexutil.Uint64
 }
 
+// StatelessPayloadStatusV1 is the result of a stateless payload execution.
+type StatelessPayloadStatusV1 struct {
+	Status          string      `json:"status"`
+	StateRoot       common.Hash `json:"stateRoot"`
+	ReceiptsRoot    common.Hash `json:"receiptsRoot"`
+	ValidationError *string     `json:"validationError"`
+}
+
 //go:generate go run github.com/fjl/gencodec -type ExecutionPayloadEnvelope -field-override executionPayloadEnvelopeMarshaling -out gen_epe.go
 
 type ExecutionPayloadEnvelope struct {
 	ExecutionPayload *ExecutableData `json:"executionPayload"  gencodec:"required"`
 	BlockValue       *big.Int        `json:"blockValue"  gencodec:"required"`
-	BlobsBundle      *BlobsBundleV1  `json:"blobsBundle"`
+	BlobsBundle      *BlobsBundle    `json:"blobsBundle"`
+	Requests         [][]byte        `json:"executionRequests"`
 	Override         bool            `json:"shouldOverrideBuilder"`
+	Witness          *hexutil.Bytes  `json:"witness,omitempty"`
 }
 
-type BlobsBundleV1 struct {
+// BlobsBundle includes the marshalled sidecar data. Note this structure is
+// shared by BlobsBundleV1 and BlobsBundleV2 for the sake of simplicity.
+//
+// - BlobsBundleV1: proofs contain exactly len(blobs) kzg proofs.
+// - BlobsBundleV2: proofs contain exactly CELLS_PER_EXT_BLOB * len(blobs) cell proofs.
+type BlobsBundle struct {
 	Commitments []hexutil.Bytes `json:"commitments"`
 	Proofs      []hexutil.Bytes `json:"proofs"`
 	Blobs       []hexutil.Bytes `json:"blobs"`
 }
 
+type BlobAndProofV1 struct {
+	Blob  hexutil.Bytes `json:"blob"`
+	Proof hexutil.Bytes `json:"proof"`
+}
+
+type BlobAndProofV2 struct {
+	Blob       hexutil.Bytes   `json:"blob"`
+	CellProofs []hexutil.Bytes `json:"proofs"` // proofs MUST contain exactly CELLS_PER_EXT_BLOB cell proofs.
+}
+
 // JSON type overrides for ExecutionPayloadEnvelope.
 type executionPayloadEnvelopeMarshaling struct {
 	BlockValue *hexutil.Big
+	Requests   []hexutil.Bytes
 }
 
 type PayloadStatusV1 struct {
-	Status          string       `json:"status"`
-	LatestValidHash *common.Hash `json:"latestValidHash"`
-	ValidationError *string      `json:"validationError"`
+	Status          string         `json:"status"`
+	Witness         *hexutil.Bytes `json:"witness,omitempty"`
+	LatestValidHash *common.Hash   `json:"latestValidHash"`
+	ValidationError *string        `json:"validationError"`
 }
 
 type TransitionConfigurationV1 struct {
@@ -200,7 +237,21 @@ func decodeTransactions(enc [][]byte) ([]*types.Transaction, error) {
 // and that the blockhash of the constructed block matches the parameters. Nil
 // Withdrawals value will propagate through the returned block. Empty
 // Withdrawals value must be passed via non-nil, length 0 value in data.
-func ExecutableDataToBlock(data ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash) (*types.Block, error) {
+func ExecutableDataToBlock(data ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash, requests [][]byte) (*types.Block, error) {
+	block, err := ExecutableDataToBlockNoHash(data, versionedHashes, beaconRoot, requests)
+	if err != nil {
+		return nil, err
+	}
+	if block.Hash() != data.BlockHash {
+		return nil, fmt.Errorf("blockhash mismatch, want %x, got %x", data.BlockHash, block.Hash())
+	}
+	return block, nil
+}
+
+// ExecutableDataToBlockNoHash is analogous to ExecutableDataToBlock, but is used
+// for stateless execution, so it skips checking if the executable data hashes to
+// the requested hash (stateless has to *compute* the root hash, it's not given).
+func ExecutableDataToBlockNoHash(data ExecutableData, versionedHashes []common.Hash, beaconRoot *common.Hash, requests [][]byte) (*types.Block, error) {
 	txs, err := decodeTransactions(data.Transactions)
 	if err != nil {
 		return nil, err
@@ -235,29 +286,10 @@ func ExecutableDataToBlock(data ExecutableData, versionedHashes []common.Hash, b
 		h := types.DeriveSha(types.Withdrawals(data.Withdrawals), trie.NewStackTrie(nil))
 		withdrawalsRoot = &h
 	}
-	// Only set requestsHash if there exists requests in the ExecutableData. This
-	// allows CLs to continue using the data structure before requests are
-	// enabled.
-	var (
-		requestsHash *common.Hash
-		requests     types.Requests
-	)
-	if data.Deposits != nil {
-		requests = make(types.Requests, 0)
-		for _, d := range data.Deposits {
-			requests = append(requests, types.NewRequest(d))
-		}
-	}
-	if data.WithdrawalRequests != nil {
-		for _, w := range data.WithdrawalRequests {
-			requests = append(requests, types.NewRequest(w))
-		}
-	}
-	if data.ConsolidationRequests != nil {
-		requests = append(requests, data.ConsolidationRequests.Requests()...)
-	}
+
+	var requestsHash *common.Hash
 	if requests != nil {
-		h := types.DeriveSha(requests, trie.NewStackTrie(nil))
+		h := types.CalcRequestsHash(requests)
 		requestsHash = &h
 	}
 
@@ -283,18 +315,15 @@ func ExecutableDataToBlock(data ExecutableData, versionedHashes []common.Hash, b
 		ParentBeaconRoot: beaconRoot,
 		RequestsHash:     requestsHash,
 	}
-	block := types.NewBlockWithHeader(header)
-	block = block.WithBody(types.Body{Transactions: txs, Uncles: nil, Withdrawals: data.Withdrawals, Requests: requests})
-	block = block.WithWitness(data.ExecutionWitness)
-	if block.Hash() != data.BlockHash {
-		return nil, fmt.Errorf("blockhash mismatch, want %x, got %x", data.BlockHash, block.Hash())
-	}
-	return block, nil
+	return types.NewBlockWithHeader(header).
+			WithBody(types.Body{Transactions: txs, Uncles: nil, Withdrawals: data.Withdrawals}).
+			WithWitness(data.ExecutionWitness),
+		nil
 }
 
 // BlockToExecutableData constructs the ExecutableData structure by filling the
 // fields from the given block. It assumes the given block is post-merge block.
-func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.BlobTxSidecar) *ExecutionPayloadEnvelope {
+func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.BlobTxSidecar, requests [][]byte) *ExecutionPayloadEnvelope {
 	data := &ExecutableData{
 		BlockHash:        block.Hash(),
 		ParentHash:       block.ParentHash(),
@@ -315,51 +344,45 @@ func BlockToExecutableData(block *types.Block, fees *big.Int, sidecars []*types.
 		ExcessBlobGas:    block.ExcessBlobGas(),
 		ExecutionWitness: block.ExecutionWitness(),
 	}
-	bundle := BlobsBundleV1{
+
+	// Add blobs.
+	bundle := BlobsBundle{
 		Commitments: make([]hexutil.Bytes, 0),
 		Blobs:       make([]hexutil.Bytes, 0),
 		Proofs:      make([]hexutil.Bytes, 0),
 	}
 	for _, sidecar := range sidecars {
 		for j := range sidecar.Blobs {
-			bundle.Blobs = append(bundle.Blobs, hexutil.Bytes(sidecar.Blobs[j][:]))
-			bundle.Commitments = append(bundle.Commitments, hexutil.Bytes(sidecar.Commitments[j][:]))
-			bundle.Proofs = append(bundle.Proofs, hexutil.Bytes(sidecar.Proofs[j][:]))
+			bundle.Blobs = append(bundle.Blobs, sidecar.Blobs[j][:])
+			bundle.Commitments = append(bundle.Commitments, sidecar.Commitments[j][:])
+		}
+		// - Before the Osaka fork, only version-0 blob transactions should be packed,
+		//   with the proof length equal to len(blobs).
+		//
+		// - After the Osaka fork, only version-1 blob transactions should be packed,
+		//   with the proof length equal to CELLS_PER_EXT_BLOB * len(blobs).
+		//
+		// Ideally, length validation should be performed based on the bundle version.
+		// In practice, this is unnecessary because blob transaction filtering is
+		// already done during payload construction.
+		for _, proof := range sidecar.Proofs {
+			bundle.Proofs = append(bundle.Proofs, proof[:])
 		}
 	}
-	setRequests(block.Requests(), data)
-	return &ExecutionPayloadEnvelope{ExecutionPayload: data, BlockValue: fees, BlobsBundle: &bundle, Override: false}
-}
 
-// setRequests differentiates the different request types and
-// assigns them to the associated fields in ExecutableData.
-func setRequests(requests types.Requests, data *ExecutableData) {
-	if requests != nil {
-		// If requests is non-nil, it means the requests are available in block and
-		// we should return an empty slice instead of nil.
-		data.Deposits = make(types.Deposits, 0)
-		data.WithdrawalRequests = make(types.WithdrawalRequests, 0)
-		data.ConsolidationRequests = make(types.ConsolidationRequests, 0)
-	}
-	for _, r := range requests {
-		switch v := r.Inner().(type) {
-		case *types.Deposit:
-			data.Deposits = append(data.Deposits, v)
-		case *types.WithdrawalRequest:
-			data.WithdrawalRequests = append(data.WithdrawalRequests, v)
-		case *types.ConsolidationRequest:
-			data.ConsolidationRequests = append(data.ConsolidationRequests, v)
-		}
+	return &ExecutionPayloadEnvelope{
+		ExecutionPayload: data,
+		BlockValue:       fees,
+		BlobsBundle:      &bundle,
+		Requests:         requests,
+		Override:         false,
 	}
 }
 
 // ExecutionPayloadBody is used in the response to GetPayloadBodiesByHash and GetPayloadBodiesByRange
 type ExecutionPayloadBody struct {
-	TransactionData       []hexutil.Bytes             `json:"transactions"`
-	Withdrawals           []*types.Withdrawal         `json:"withdrawals"`
-	Deposits              types.Deposits              `json:"depositRequests"`
-	WithdrawalRequests    types.WithdrawalRequests    `json:"withdrawalRequests"`
-	ConsolidationRequests types.ConsolidationRequests `json:"consolidationRequests"`
+	TransactionData []hexutil.Bytes     `json:"transactions"`
+	Withdrawals     []*types.Withdrawal `json:"withdrawals"`
 }
 
 // Client identifiers to support ClientVersionV1.

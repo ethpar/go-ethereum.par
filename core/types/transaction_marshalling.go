@@ -31,23 +31,23 @@ import (
 type txJSON struct {
 	Type hexutil.Uint64 `json:"type"`
 
-	ChainID              *hexutil.Big       `json:"chainId,omitempty"`
-	Nonce                *hexutil.Uint64    `json:"nonce"`
-	To                   *common.Address    `json:"to"`
-	Gas                  *hexutil.Uint64    `json:"gas"`
-	GasPrice             *hexutil.Big       `json:"gasPrice"`
-	MaxPriorityFeePerGas *hexutil.Big       `json:"maxPriorityFeePerGas"`
-	MaxFeePerGas         *hexutil.Big       `json:"maxFeePerGas"`
-	MaxFeePerBlobGas     *hexutil.Big       `json:"maxFeePerBlobGas,omitempty"`
-	Value                *hexutil.Big       `json:"value"`
-	Input                *hexutil.Bytes     `json:"input"`
-	AccessList           *AccessList        `json:"accessList,omitempty"`
-	BlobVersionedHashes  []common.Hash      `json:"blobVersionedHashes,omitempty"`
-	AuthorizationList    *AuthorizationList `json:"authorizationList,omitempty"`
-	V                    *hexutil.Big       `json:"v"`
-	R                    *hexutil.Big       `json:"r"`
-	S                    *hexutil.Big       `json:"s"`
-	YParity              *hexutil.Uint64    `json:"yParity,omitempty"`
+	ChainID              *hexutil.Big           `json:"chainId,omitempty"`
+	Nonce                *hexutil.Uint64        `json:"nonce"`
+	To                   *common.Address        `json:"to"`
+	Gas                  *hexutil.Uint64        `json:"gas"`
+	GasPrice             *hexutil.Big           `json:"gasPrice"`
+	MaxPriorityFeePerGas *hexutil.Big           `json:"maxPriorityFeePerGas"`
+	MaxFeePerGas         *hexutil.Big           `json:"maxFeePerGas"`
+	MaxFeePerBlobGas     *hexutil.Big           `json:"maxFeePerBlobGas,omitempty"`
+	Value                *hexutil.Big           `json:"value"`
+	Input                *hexutil.Bytes         `json:"input"`
+	AccessList           *AccessList            `json:"accessList,omitempty"`
+	BlobVersionedHashes  []common.Hash          `json:"blobVersionedHashes,omitempty"`
+	AuthorizationList    []SetCodeAuthorization `json:"authorizationList,omitempty"`
+	V                    *hexutil.Big           `json:"v"`
+	R                    *hexutil.Big           `json:"r"`
+	S                    *hexutil.Big           `json:"s"`
+	YParity              *hexutil.Uint64        `json:"yParity,omitempty"`
 
 	// Blob transaction sidecar encoding:
 	Blobs       []kzg4844.Blob       `json:"blobs,omitempty"`
@@ -164,13 +164,12 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.Value = (*hexutil.Big)(itx.Value.ToBig())
 		enc.Input = (*hexutil.Bytes)(&itx.Data)
 		enc.AccessList = &itx.AccessList
-		enc.AuthorizationList = &itx.AuthList
+		enc.AuthorizationList = itx.AuthList
 		enc.V = (*hexutil.Big)(itx.V.ToBig())
 		enc.R = (*hexutil.Big)(itx.R.ToBig())
 		enc.S = (*hexutil.Big)(itx.S.ToBig())
 		yparity := itx.V.Uint64()
 		enc.YParity = (*hexutil.Uint64)(&yparity)
-
 	}
 	return json.Marshal(&enc)
 }
@@ -354,7 +353,11 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.ChainID == nil {
 			return errors.New("missing required field 'chainId' in transaction")
 		}
-		itx.ChainID = uint256.MustFromBig((*big.Int)(dec.ChainID))
+		var overflow bool
+		itx.ChainID, overflow = uint256.FromBig(dec.ChainID.ToInt())
+		if overflow {
+			return errors.New("'chainId' value overflows uint256")
+		}
 		if dec.Nonce == nil {
 			return errors.New("missing required field 'nonce' in transaction")
 		}
@@ -396,7 +399,6 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		itx.BlobHashes = dec.BlobVersionedHashes
 
 		// signature R
-		var overflow bool
 		if dec.R == nil {
 			return errors.New("missing required field 'r' in transaction")
 		}
@@ -433,7 +435,11 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.ChainID == nil {
 			return errors.New("missing required field 'chainId' in transaction")
 		}
-		itx.ChainID = uint256.MustFromBig((*big.Int)(dec.ChainID))
+		var overflow bool
+		itx.ChainID, overflow = uint256.FromBig(dec.ChainID.ToInt())
+		if overflow {
+			return errors.New("'chainId' value overflows uint256")
+		}
 		if dec.Nonce == nil {
 			return errors.New("missing required field 'nonce' in transaction")
 		}
@@ -468,10 +474,9 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.AuthorizationList == nil {
 			return errors.New("missing required field 'authorizationList' in transaction")
 		}
-		itx.AuthList = *dec.AuthorizationList
+		itx.AuthList = dec.AuthorizationList
 
 		// signature R
-		var overflow bool
 		if dec.R == nil {
 			return errors.New("missing required field 'r' in transaction")
 		}
@@ -509,6 +514,5 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	// Now set the inner transaction.
 	tx.setDecoded(inner, 0)
 
-	// TODO: check hash here?
 	return nil
 }
